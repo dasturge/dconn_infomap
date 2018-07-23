@@ -98,12 +98,16 @@ def create_pajek(rmat, dmat, dist_thresh, tie_density, output):
                 array[idx] = 0
 
             # threshold distances
-            remove = np.argwhere(dmat[..., idx] < dist_thresh)
-            array[remove] = 0
+            remove_dist = np.argwhere(dmat[..., idx] < dist_thresh)
+            array[remove_dist] = 0
 
             # threshold percentages
+            remove_thresh = np.argwhere(array < thresh)
+            array[remove_thresh] = 0
 
-    x = 1
+            # write values to temporary file.
+
+        # write total number of edges then append temporary file.
 
 
 if __name__ == '__main__':
