@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 import argparse
+import os
 
-from helpers import iterate_dconn
+from helpers import create_pajek, run_infomap
 
 
 def _cli():
@@ -9,10 +10,12 @@ def _cli():
     args = parser.parse_args()
     return interface(
         args.dconn,
-        args.perc_thresh,
+        args.output,
+        args.tie_density,
         args.dist_thresh,
         args.dmat,
-        args.tie_density,
+        args.min_network_size,
+        args.min_region_size
     )
 
 
@@ -45,10 +48,15 @@ def generate_parser(parser=None):
     return parser
 
 
-def interface(dconn_filename, perc_thresh, dist_thresh, dmat, tie_density):
+def interface(dconn_filename, output_folder, tie_density, dist_thresh, dmat,
+              min_network_size, min_region_size):
 
     # create pajek format node/edge specification
-    dconn = iterate_dconn(dconn_filename)
+    pajek = os.path.join(output_folder, 'pajek_network_spec.net')
+    create_pajek(dconn_filename, dmat, tie_density, dist_thresh, output_folder)
+
+    # run infomap
+    run_infomap(pajek, output_folder, attempts=5)
 
 
 if __name__ == '__main__':

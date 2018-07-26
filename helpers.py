@@ -1,76 +1,66 @@
-import array
-import heapq
 import os
 import subprocess
 import tempfile
+import time
 
 import h5py
 import nibabel
 import numpy as np
 
 
-def nii2bytes(nii):
-    """
-    reads the values from a dconn into raw bytes.
-    :param nii: filename of dconn
-    :param f: output bytes file descriptor
-    :return:
-    """
-    for arr in iterate_dconn(nii):
-        floats = array.array('f', arr)
-        yield floats
+def niiquantile(filename, quantile):
+    if quantile < .5:
+        print('no need for lower threshold implementation as of yet')
+        raise NotImplementedError
+
+    # get number of values for in-memory quantile computation.
+    shape = get_shape(filename)
+    num_values = np.product(shape)
+    chunksize = int(num_values * (1 - quantile))
+    approx_step = int(chunksize / np.product(shape[:-1]) / 2 + 1)
+    gen = chunk_iter_dconn(filename, chunksize, approx_step)
+
+    # initialize sorted array
+    print('reading initial %s values from dconn (%s of total values).' % (
+        chunksize, (1 - quantile)))
+    t1 = time.perf_counter()
+    top = next(gen)
+    top.sort()
+    t = time.perf_counter() - t1
+    print('read and sorted initial values in %s seconds' % int(t + 1))
+
+    # in sets of chunksize, mergesort
+    print('reading and comparing values in sets of %s' % chunksize)
+    for i, vals in enumerate(gen):
+        top = np.concatenate((top, vals))
+        del vals
+        top.sort(kind='mergesort')
+        top = top[chunksize:]
+        t = time.perf_counter() - t1
+        print('about %s%% done. %s seconds passed'
+              % (int((1 - quantile) * (i + 1) * 100), int(t + 1)))
+    t = time.perf_counter() - t1
+    print('calculated %s quantile of %s numbers in %s total seconds' % (
+        quantile, num_values, int(t + 1)))
+
+    return top[0]  # return lowest value
 
 
-def numericsfromfile(f):
-    while True:
-        a = array.array('f')
-        a.fromfile(f.read(a.itemsize * 8 * 1000))
-        if not a:
-            break
-        for x in a:
-            yield x
-
-
-def niiquantile(nii, quantile):
-    """
-    sorts values from a dconn without loading into memory.  Typical dconns
-    are 32GB ~ 1 billion floating point numbers
-    :param nii: filename of dconn
-    :return:
-    """
-    niiterator = nii2bytes(nii)
-    iters = []
-    for a in niiterator:
-        f = tempfile.TemporaryFile()
-        array.array('f', sorted(a)).tofile(f)
-        f.seek(0)
-        iters.append(numericsfromfile(f))
-
-    a = array.array('f')
-    with open('tmpnii', 'wb') as fd:
-        for x in heapq.merge(*iters):
-            a.append(x)
-            if len(a) >= 1000:
-                a.tofile(fd)
-                del a[:]
-        if a:
-            a.tofile(fd)
-    size = os.stat('tmpnii').st_size * 8  # to bits
-    quant = size * (1 - quantile) // (array.array('d').itemsize * 8)
-    with open('tmpnii', 'rb') as fd:
-        fd.seek(quant)
-        typing = array.array('d')
-        bits = fd.read(typing.itemsize * 8)
-        out = typing.frombytes(bits)
-    os.remove('tmpnii')
-
-    return out
-
-
-def iterate_dconn(filename):
+def iterate_dconn(filename, step=1):
     nii = nibabel.load(filename)
-    for idx in range(nii.shape[-1]):
-        yield nii.dataobj[..., idx]
+    for idx in range(0, nii.shape[-1], step):
+        yield nii.dataobj[..., idx:idx+step].astype(np.float).flatten()
+
+
+def chunk_iter_dconn(filename, chunksize, stepsize=1):
+    dconn = iterate_dconn(filename, stepsize)
+    prev = np.array([], dtype=np.float)
+    for row in dconn:
+        prev = np.concatenate((prev, row))
+        if prev.size >= chunksize:
+            yield prev[:chunksize]
+            prev = prev[chunksize:]
+    yield prev
 
 
 def get_shape(filename):
@@ -78,18 +68,20 @@ def get_shape(filename):
     return nii.shape
 
 
-def create_pajek(rmat, dmat, dist_thresh, tie_density, output):
-    shape = get_shape(rmat)
-    dmat = [x for x in h5py.File(dmat).values()][0]
+def create_pajek(rmat, dmat, tie_density, dist_thresh, output):
+
     with open(output, 'w') as out:
         # write vertices to pajek file
-        out.write('*Vertices %s' % shape[-1] + '\n')
+        shape = get_shape(rmat)
+        out.write('*Vertices %s\n' % shape[-1])
         gen = ('%s "%s"\n' % (i, i) for i in range(1, shape[-1] + 1))
         out.writelines(gen)
 
-        # compute edge density threshold on disk for data too big for mem
-        thresh = niiquantile(rmat, tie_density)
+        # compute edge weight threshold on disk for data too big for mem
+        thresh = niiquantile(rmat, (1 - tie_density))
 
+        t = tempfile.TemporaryFile()
+        dmat = [x for x in h5py.File(dmat, 'r').values()][0]
         # iterate through reading rows from disk to conserve system memory
         for idx, array in enumerate(iterate_dconn(rmat)):
 
@@ -106,12 +98,41 @@ def create_pajek(rmat, dmat, dist_thresh, tie_density, output):
             array[remove_thresh] = 0
 
             # write values to temporary file.
+            gen = ('%s %s %.6f\n' % (idx, i, round(v, 6))
+                   for i, v in enumerate(array) if v)
+            t.writelines(gen)
 
-        # write total number of edges then append temporary file.
+        # find total number of edges then append temporary file.
+        t.seek(0)
+        for i, l in enumerate(t):
+            pass
+        edges = i + 1
+        t.seek(0)
+        out.write('*Edges %s\n' % edges)
+        for line in t:
+            out.write(line)
+        t.close()
+
+
+def run_infomap(pajek, output_folder, attempts=5, seed=0):
+    out_log = os.path.join(output_folder, 'infomap.out')
+    err_log = os.path.join(output_folder, 'infomap.err')
+    stdout, _ = subprocess.Popen('which infomap', shell=True,
+                              stdout=subprocess.PIPE).communicate()
+    print('using infomap binary: %s' % str(stdout))
+    cmd = ' '.join(['infomap', pajek, output_folder, '--clu', '-i', 'pajek',
+                    '-u', '-s', str(seed), '-N', str(attempts)])
+    with open(out_log, 'w') as out, open(err_log, 'w') as err:
+        subprocess.run(cmd, shell=True, stdout=out, stderr=err)
+
+
+def clu_to_ciftis(clu_file):
+    pass
 
 
 if __name__ == '__main__':
     import sys
     filename = sys.argv[1]
     dmat = sys.argv[2]
-    create_pajek(filename, dmat, 15, .05, 'test.pajek')
+    create_pajek(filename, dmat, .005, 15, 'test.pajek')
+    run_infomap('test.pajek', os.path.dirname(__file__))
