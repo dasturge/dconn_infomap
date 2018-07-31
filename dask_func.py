@@ -22,7 +22,8 @@ def quantile_thresh(mat: da.Array, quantile):
     d = mat.shape[-1]
     d = d * (d - 1) / 2  # upper triangle is considered only
     num = int((1 - quantile) * d)
-    threshold = mat.flatten().topk(num)[0].to_hdf5(os.path.join(hd_path, 'tmpthr.hdf5'), '/x')
+    threshold = mat.flatten().to_hdf5('tmpthr0.hdf5', '/x')
+    threshold = threshold.topk(num)[0].to_hdf5(os.path.join(hd_path, 'tmpthr1.hdf5'), '/x')
     print(threshold)
     mat = da.where(mat < threshold, 0, mat)
     mat.to_hdf5(os.path.join(hd_path, 'tmp1.hdf5'), '/x')
